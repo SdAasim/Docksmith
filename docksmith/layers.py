@@ -1,7 +1,6 @@
 """
 Layer utilities
-  make_delta_tar(files)              → deterministic tar bytes  [(arcname, src_path), ...]
-  make_tree_tar(root)                → tar entire directory tree
+  make_delta_tar(files)              → deterministic tar bytes
   digest_bytes(data)                 → "sha256:<hex>"
   digest_file(path)                  → "sha256:<hex>"
   extract_layer(tar_bytes, dest_dir) → None
@@ -15,6 +14,8 @@ import sys
 import tarfile
 from pathlib import Path
 from typing import List, Tuple
+
+SKIP_PREFIXES = ("proc/", "sys/", "dev/", "run/", "tmp/")
 
 
 def digest_bytes(data: bytes) -> str:
@@ -30,36 +31,31 @@ def digest_file(path) -> str:
 
 
 def _zero_tarinfo(info: tarfile.TarInfo) -> tarfile.TarInfo:
-    """Zero all non-content metadata for reproducibility."""
-    info.mtime  = 0
-    info.uid    = 0
-    info.gid    = 0
-    info.uname  = ""
-    info.gname  = ""
+    info.mtime = info.uid = info.gid = 0
+    info.uname = info.gname = ""
     return info
 
 
 def make_delta_tar(files: List[Tuple[str, str]]) -> bytes:
     """
     Build a deterministic tar from (arcname, src_path) pairs.
-    Sorted by arcname. Parent directories synthesised automatically.
-    Timestamps zeroed.
+    Sorted by arcname. Parent directories synthesised. Timestamps zeroed.
     """
     buf = io.BytesIO()
     seen_dirs: set = set()
     sorted_files = sorted(files, key=lambda x: x[0])
 
     with tarfile.open(fileobj=buf, mode="w:") as tf:
+
         def _ensure_dir(arc_dir: str):
-            if arc_dir in seen_dirs or not arc_dir or arc_dir == ".":
+            if arc_dir in seen_dirs or not arc_dir or arc_dir in (".", "/"):
                 return
-            # Recurse to parent first
             parent = str(Path(arc_dir).parent)
             if parent != arc_dir:
                 _ensure_dir(parent)
             info = tarfile.TarInfo(name=arc_dir)
-            info.type  = tarfile.DIRTYPE
-            info.mode  = 0o755
+            info.type = tarfile.DIRTYPE
+            info.mode = 0o755
             _zero_tarinfo(info)
             tf.addfile(info)
             seen_dirs.add(arc_dir)
@@ -89,31 +85,21 @@ def make_delta_tar(files: List[Tuple[str, str]]) -> bytes:
     return buf.getvalue()
 
 
-def make_tree_tar(root: str) -> bytes:
-    """Tar an entire directory tree deterministically."""
-    root = Path(root)
-    pairs: List[Tuple[str, str]] = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames.sort()
-        dp = Path(dirpath)
-        rel_dir = dp.relative_to(root)
-        if str(rel_dir) != ".":
-            pairs.append((str(rel_dir), str(dp)))
-        for fn in sorted(filenames):
-            rel = rel_dir / fn if str(rel_dir) != "." else Path(fn)
-            pairs.append((str(rel), str(dp / fn)))
-    return make_delta_tar(pairs)
-
-
 def extract_layer(tar_data: bytes, dest_dir: str):
-    """Extract a tar layer into dest_dir. Later calls overwrite earlier ones."""
+    """Extract a tar layer into dest_dir. Later layers overwrite earlier ones."""
     Path(dest_dir).mkdir(parents=True, exist_ok=True)
     buf = io.BytesIO(tar_data)
     with tarfile.open(fileobj=buf, mode="r:*") as tf:
         safe_members = []
         for m in tf.getmembers():
-            m.name = m.name.lstrip("/")
+            # Sanitise path
+            m.name = m.name.lstrip("./").lstrip("/")
+            if not m.name:
+                continue
             if ".." in Path(m.name).parts:
+                continue
+            # Skip virtual filesystem paths
+            if any(m.name.startswith(p) for p in SKIP_PREFIXES):
                 continue
             safe_members.append(m)
         tf.extractall(path=dest_dir, members=safe_members)

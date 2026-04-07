@@ -6,10 +6,13 @@ ImageStore — manages ~/.docksmith/
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
-DOCKSMITH_HOME = Path.home() / ".docksmith"
+# Use DOCKSMITH_HOME env var if set — fixes sudo vs normal user home mismatch
+_default = Path(os.environ.get("SUDO_USER") and f"/home/{os.environ['SUDO_USER']}" or Path.home()) / ".docksmith"
+DOCKSMITH_HOME = Path(os.environ.get("DOCKSMITH_HOME", str(_default)))
 IMAGES_DIR  = DOCKSMITH_HOME / "images"
 LAYERS_DIR  = DOCKSMITH_HOME / "layers"
 CACHE_DIR   = DOCKSMITH_HOME / "cache"
